@@ -11,8 +11,7 @@ section .data
     err_ip_format db 'Error: Invalid IP format',10,0
     err_socket   db 'Error: Socket creation failed',10,0
     err_connect  db 'Error: Connection failed',10,0
-    timespec     dq 5, 0          ; 5 secondes entre les tentatives
-    
+    timespec     dq 5, 0          ; 5 secondes entre les tentatives    
     ; Port fixe
     port_num     dw 4444
 
@@ -96,9 +95,6 @@ validate_and_parse_ip:
     pop rbp
     ret
 
-;----------------------------------------------------------
-; Programme principal
-;----------------------------------------------------------
 _start:
     pop rcx                       ; argc
     cmp rcx, 2
